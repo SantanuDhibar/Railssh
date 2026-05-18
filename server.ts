@@ -144,10 +144,12 @@ function timingSafeEqual(a: string, b: string): boolean {
   const encoder = new TextEncoder();
   const actualBytes = encoder.encode(a);
   const expectedBytes = encoder.encode(b);
+  const maxLength = Math.max(actualBytes.length, expectedBytes.length);
   let mismatch = actualBytes.length ^ expectedBytes.length;
-  for (let i = 0; i < expectedBytes.length; i++) {
+  for (let i = 0; i < maxLength; i++) {
     const actualByte = actualBytes[i] ?? 0;
-    mismatch |= actualByte ^ expectedBytes[i];
+    const expectedByte = expectedBytes[i] ?? 0;
+    mismatch |= actualByte ^ expectedByte;
   }
   return mismatch === 0;
 }
@@ -177,6 +179,7 @@ function parseBasicAuth(authHeader: string): { username: string; password: strin
       password: decoded.slice(separatorIndex + 1),
     };
   } catch {
+    console.warn("[SSH] Failed to decode Basic auth header.");
     return null;
   }
 }
@@ -231,6 +234,16 @@ function getRequestAuth(req: Request): RequestAuth {
   return { authenticated: false, hasCredentials: false };
 }
 
+function getInitialAuthError(initialAuth: RequestAuth, authenticated: boolean): string | null {
+  if (!isAuthConfigured()) {
+    return "SSH authentication is not configured. Set SSH_AUTH_PASSWORD (env or server.ts).";
+  }
+  if (initialAuth.hasCredentials && !authenticated) {
+    return initialAuth.error || "Invalid SSH credentials.";
+  }
+  return null;
+}
+
 function parseJsonPayload(data: Uint8Array): Record<string, unknown> | null {
   try {
     const text = new TextDecoder().decode(data);
@@ -253,17 +266,18 @@ function coerceString(value: unknown): string | null {
 
 function coercePort(portValue: unknown): number | null {
   if (typeof portValue === "number" && Number.isFinite(portValue)) {
-    return Math.trunc(portValue);
+    const port = Math.trunc(portValue);
+    return port >= 1 && port <= 65535 ? port : null;
   }
   if (typeof portValue === "string") {
     const parsed = Number.parseInt(portValue, 10);
-    if (!Number.isNaN(parsed)) return parsed;
+    if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 65535) return parsed;
   }
   return null;
 }
 
 function getPasswordPlaceholder(): string {
-  return isAuthConfigured() ? "YOUR_PASSWORD_HERE" : "SET_SSH_AUTH_PASSWORD";
+  return "<YOUR_PASSWORD>";
 }
 
 function getUsernamePlaceholder(): string {
@@ -307,12 +321,10 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
 
   socket.onopen = () => {
     console.log(`[SSH] New WebSocket connection`);
-    if (!isAuthConfigured()) {
-      sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD (env or server.ts).");
+    const authError = getInitialAuthError(initialAuth, authenticated);
+    if (authError) {
+      sendAuthError(authError);
       return;
-    }
-    if (initialAuth.hasCredentials && !authenticated) {
-      sendAuthError(initialAuth.error || "Invalid SSH credentials.");
     }
   };
 
@@ -332,12 +344,9 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
 
       // First message handling for connection configuration
       if (!connection) {
-        if (!isAuthConfigured()) {
-          sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD (env or server.ts).");
-          return;
-        }
-        if (initialAuth.hasCredentials && !authenticated) {
-          sendAuthError(initialAuth.error || "Invalid SSH credentials.");
+        const authError = getInitialAuthError(initialAuth, authenticated);
+        if (authError) {
+          sendAuthError(authError);
           return;
         }
 
