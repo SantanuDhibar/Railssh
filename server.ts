@@ -7,11 +7,17 @@ const DOMAIN = "railssh-production-232f.up.railway.app";
 const WS_PATH = "ws";
 const SUB_PATH = "sub";
 const SSH_PATH = "ssh";
+const SSH_SUB_PATH = `${SUB_PATH}/ssh`;
 const PORT = parseInt(Deno.env.get("PORT") || "3000", 10);
 
 // SSH Target Configuration
 const SSH_TARGET_HOST = "railssh-production-232f.up.railway.app";  // Change this to your SSH server
 const SSH_TARGET_PORT = 22;
+
+// SSH WebSocket Authentication (required)
+// Set a strong password before deploying
+const SSH_AUTH_USERNAME = ""; // Optional username for Basic auth
+const SSH_AUTH_PASSWORD = "CHANGE_THIS_PASSWORD";
 
 // Allowed SSH hosts (empty array = allow any)
 const ALLOWED_SSH_HOSTS: string[] = []; // Leave empty to allow any host
@@ -121,12 +127,147 @@ function isHostAllowed(host: string): boolean {
   });
 }
 
+// ==================== SSH Authentication ====================
+
+type RequestAuth = {
+  authenticated: boolean;
+  hasCredentials: boolean;
+  error?: string;
+};
+
+function isAuthConfigured(): boolean {
+  return SSH_AUTH_PASSWORD.trim().length > 0 && SSH_AUTH_PASSWORD !== "CHANGE_THIS_PASSWORD";
+}
+
+function validateCredentials(password?: string | null, username?: string | null): boolean {
+  if (!isAuthConfigured()) return false;
+  if (!password || password !== SSH_AUTH_PASSWORD) return false;
+  if (SSH_AUTH_USERNAME && username !== SSH_AUTH_USERNAME) return false;
+  return true;
+}
+
+function parseBasicAuth(authHeader: string): { username: string; password: string } | null {
+  const [scheme, value] = authHeader.split(/\s+/, 2);
+  if (!scheme || !value || scheme.toLowerCase() !== "basic") return null;
+  try {
+    const decoded = atob(value);
+    const separatorIndex = decoded.indexOf(":");
+    if (separatorIndex === -1) {
+      return { username: decoded, password: "" };
+    }
+    return {
+      username: decoded.slice(0, separatorIndex),
+      password: decoded.slice(separatorIndex + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getRequestAuth(req: Request): RequestAuth {
+  if (!isAuthConfigured()) {
+    return {
+      authenticated: false,
+      hasCredentials: false,
+      error: "SSH password not configured. Set SSH_AUTH_PASSWORD in server.ts.",
+    };
+  }
+
+  const authHeader = req.headers.get("authorization");
+  if (authHeader) {
+    const [scheme, value] = authHeader.split(/\s+/, 2);
+    const normalizedScheme = scheme?.toLowerCase();
+    if (!value || !normalizedScheme) {
+      return { authenticated: false, hasCredentials: true, error: "Invalid Authorization header." };
+    }
+    if (normalizedScheme === "basic") {
+      const parsed = parseBasicAuth(authHeader);
+      if (!parsed || !validateCredentials(parsed.password, parsed.username)) {
+        return { authenticated: false, hasCredentials: true, error: "Invalid SSH credentials." };
+      }
+      return { authenticated: true, hasCredentials: true };
+    }
+    if (normalizedScheme === "bearer") {
+      if (!validateCredentials(value, null)) {
+        return { authenticated: false, hasCredentials: true, error: "Invalid SSH credentials." };
+      }
+      return { authenticated: true, hasCredentials: true };
+    }
+    return { authenticated: false, hasCredentials: true, error: "Unsupported Authorization scheme." };
+  }
+
+  const url = new URL(req.url);
+  const token =
+    url.searchParams.get("token") ||
+    url.searchParams.get("password") ||
+    url.searchParams.get("auth");
+  const username =
+    url.searchParams.get("username") || url.searchParams.get("user");
+
+  if (token) {
+    if (!validateCredentials(token, username)) {
+      return { authenticated: false, hasCredentials: true, error: "Invalid SSH credentials." };
+    }
+    return { authenticated: true, hasCredentials: true };
+  }
+
+  return { authenticated: false, hasCredentials: false };
+}
+
+function parseJsonPayload(data: Uint8Array): Record<string, unknown> | null {
+  try {
+    const text = new TextDecoder().decode(data);
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function coerceString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  return null;
+}
+
+function coercePort(portValue: unknown): number | null {
+  if (typeof portValue === "number" && Number.isFinite(portValue)) {
+    return Math.trunc(portValue);
+  }
+  if (typeof portValue === "string") {
+    const parsed = Number.parseInt(portValue, 10);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return null;
+}
+
 // ==================== SSH WebSocket Handler ====================
 
 async function handleSSHWebSocket(req: Request): Promise<Response> {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let connection: Deno.Conn | null = null;
   let keepAliveInterval: number | null = null;
+  const initialAuth = getRequestAuth(req);
+  let authenticated = initialAuth.authenticated;
+
+  const sendJsonMessage = (payload: Record<string, unknown>) => {
+    if (socket.readyState === WebSocket.OPEN) {
+      const message = new TextEncoder().encode(JSON.stringify(payload));
+      socket.send(message);
+    }
+  };
+
+  const sendAuthError = (message: string) => {
+    console.error(`[SSH] Auth error: ${message}`);
+    if (socket.readyState === WebSocket.OPEN) {
+      sendJsonMessage({ error: message });
+      socket.close();
+    }
+  };
 
   // Keep connection alive with ping/pong
   keepAliveInterval = setInterval(() => {
@@ -141,6 +282,13 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
 
   socket.onopen = () => {
     console.log(`[SSH] New WebSocket connection`);
+    if (!isAuthConfigured()) {
+      sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD.");
+      return;
+    }
+    if (initialAuth.hasCredentials && !authenticated) {
+      sendAuthError(initialAuth.error || "Invalid SSH credentials.");
+    }
   };
 
   socket.onmessage = async (event) => {
@@ -159,51 +307,78 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
 
       // First message handling for connection configuration
       if (!connection) {
+        if (!isAuthConfigured()) {
+          sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD.");
+          return;
+        }
+        if (initialAuth.hasCredentials && !authenticated) {
+          sendAuthError(initialAuth.error || "Invalid SSH credentials.");
+          return;
+        }
+
+        const jsonPayload = parseJsonPayload(data);
+
+        if (!authenticated) {
+          if (!jsonPayload) {
+            sendAuthError(
+              "Authentication required. Provide Authorization header, query token, or JSON {\"password\":\"...\"}."
+            );
+            return;
+          }
+
+          const password =
+            coerceString(jsonPayload.password) ||
+            coerceString(jsonPayload.token) ||
+            coerceString(jsonPayload.auth);
+          const username =
+            coerceString(jsonPayload.username) ||
+            coerceString(jsonPayload.user);
+
+          if (!validateCredentials(password, username)) {
+            sendAuthError("Invalid SSH credentials.");
+            return;
+          }
+          authenticated = true;
+        }
+
         let sshHost = SSH_TARGET_HOST;
         let sshPort = SSH_TARGET_PORT;
-        
-        // Try to parse JSON configuration from first message
-        try {
-          const decoder = new TextDecoder();
-          const text = decoder.decode(data);
-          const json = JSON.parse(text);
-          
-          if (json.host) sshHost = json.host;
-          if (json.port) sshPort = json.port;
-          
-          console.log(`[SSH] Connecting to ${sshHost}:${sshPort}`);
-        } catch {
-          // Not JSON, use default target
-          console.log(`[SSH] Using default target ${sshHost}:${sshPort}`);
+
+        if (jsonPayload) {
+          const requestedHost = coerceString(jsonPayload.host);
+          const requestedPort = coercePort(jsonPayload.port);
+          if (requestedHost) sshHost = requestedHost;
+          if (requestedPort) sshPort = requestedPort;
         }
-        
+
+        console.log(`[SSH] Connecting to ${sshHost}:${sshPort}`);
+
         // Validate allowed hosts
         if (!isHostAllowed(sshHost)) {
           throw new Error(`Host ${sshHost} not allowed`);
         }
-        
+
         // Validate port range
         if (sshPort < 1 || sshPort > 65535) {
           throw new Error(`Invalid port: ${sshPort}`);
         }
-        
+
         // Connect to SSH server
         connection = await Deno.connect({
           hostname: sshHost,
           port: sshPort,
           transport: "tcp",
         });
-        
+
         console.log(`[SSH] Connected to ${sshHost}:${sshPort}`);
-        
+
         // Send connection success response
-        const successMsg = new TextEncoder().encode(JSON.stringify({ 
-          status: "connected", 
-          host: sshHost, 
-          port: sshPort 
-        }));
-        socket.send(successMsg);
-        
+        sendJsonMessage({
+          status: "connected",
+          host: sshHost,
+          port: sshPort,
+        });
+
         // Start bidirectional piping
         // Remote -> WebSocket
         (async () => {
@@ -212,7 +387,7 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
             while (connection) {
               const n = await connection.read(buffer);
               if (!n) break;
-              
+
               if (socket.readyState === WebSocket.OPEN) {
                 socket.send(buffer.slice(0, n));
               } else {
@@ -231,14 +406,10 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
             }
           }
         })();
-        
-        // Send any remaining data from the first message
-        try {
-          JSON.parse(new TextDecoder().decode(data));
-        } catch {
-          if (connection) {
-            await connection.write(data);
-          }
+
+        // Send any remaining data from the first message (raw SSH payload)
+        if (!jsonPayload && connection) {
+          await connection.write(data);
         }
       } else {
         // Data forwarding
@@ -249,10 +420,7 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
     } catch (err) {
       console.error("[SSH] Handler error:", err.message);
       if (socket.readyState === WebSocket.OPEN) {
-        const errorMsg = new TextEncoder().encode(JSON.stringify({ 
-          error: err.message 
-        }));
-        socket.send(errorMsg);
+        sendJsonMessage({ error: err.message });
         socket.close();
       }
     }
@@ -387,20 +555,65 @@ function generateVLESSConfig(): string {
 }
 
 function generateSSHConfig(): string {
+  const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
+  const passwordValue = isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>";
+  const usernameValue = SSH_AUTH_USERNAME || "user";
+  const basicAuth = btoa(`${usernameValue}:${passwordValue}`);
   return `# SSH over WebSocket Tunnel Configuration
 # =========================================
 
-# WebSocket URL: wss://${DOMAIN}/${SSH_PATH}
+# WebSocket URL: ${wsUrl}
+# Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
-# Method 1: Using websocat
-websocat wss://${DOMAIN}/${SSH_PATH} --text ssh://${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
+# Authentication (required)
+# Username: ${SSH_AUTH_USERNAME || "(optional)"}
+# Password: ${passwordValue}
+# Header (Bearer): Authorization: Bearer ${passwordValue}
+# Header (Basic): Authorization: Basic ${basicAuth}
+# Query: ${wsUrl}?token=${passwordValue}
+# JSON first message: {"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
+
+# Method 1: Using websocat (Bearer auth)
+websocat -H "Authorization: Bearer ${passwordValue}" ${wsUrl} --text ssh://${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 # Method 2: Using wstunnel
-wstunnel client --ws-url wss://${DOMAIN}/${SSH_PATH} -L 2222:${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
+wstunnel client --ws-url ${wsUrl} --header "Authorization: Bearer ${passwordValue}" -L 2222:${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 # Then connect with: ssh -p 2222 user@localhost
 
 # Method 3: Using custom client
-# WebSocket URL: wss://${DOMAIN}/${SSH_PATH}
+# WebSocket URL: ${wsUrl}
+# First message JSON: {"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
+`;
+}
+
+function generateSSHSubscription(): string {
+  const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
+  const passwordValue = isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>";
+  const usernameValue = SSH_AUTH_USERNAME || "(optional)";
+  const basicAuth = btoa(`${SSH_AUTH_USERNAME || "user"}:${passwordValue}`);
+
+  return `# SSH over WebSocket Subscription
+# =========================================
+
+ws_url: ${wsUrl}
+target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
+
+auth:
+  username: ${usernameValue}
+  password: ${passwordValue}
+  bearer: ${passwordValue}
+  basic: ${basicAuth}
+
+# JSON handshake example:
+{"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
+
+# websocat example:
+websocat -H "Authorization: Bearer ${passwordValue}" ${wsUrl}
+
+# darktunnel example:
+# Configure your darktunnel client to use ${wsUrl}
+# and send header: Authorization: Bearer ${passwordValue}
+# Then forward local port 2222 to ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 `;
 }
 
@@ -415,9 +628,12 @@ console.log(`   - Domain: ${DOMAIN}`);
 console.log(`   - VLESS Path: /${WS_PATH}`);
 console.log(`   - SSH Path: /${SSH_PATH}`);
 console.log(`   - Subscription Path: /${SUB_PATH}`);
+console.log(`   - SSH Subscription Path: /${SSH_SUB_PATH}`);
 console.log(`   - SSH Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}`);
 console.log(`   - VLESS UUID: ${UUID}`);
 console.log(`   - Allowed Hosts: ${ALLOWED_SSH_HOSTS.length ? ALLOWED_SSH_HOSTS.join(", ") : "any"}`);
+console.log(`   - SSH Auth: ${isAuthConfigured() ? "enabled" : "not configured"}`);
+console.log(`   - SSH Auth Username: ${SSH_AUTH_USERNAME || "not set"}`);
 console.log("=".repeat(60));
 console.log("✅ Server starting...");
 console.log("=".repeat(60));
@@ -475,14 +691,20 @@ serve(
         <strong>📥 Subscription:</strong> <code>/${SUB_PATH}</code>
     </div>
     
+    <div class="endpoint">
+        <strong>📥 SSH Subscription:</strong> <code>/${SSH_SUB_PATH}</code>
+    </div>
+    
     <h2>🚀 Quick Start - SSH Tunnel</h2>
-    <pre>websocat wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
+    <pre>websocat -H "Authorization: Bearer ${isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>"}" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
     
     <h2>📦 VLESS Configuration</h2>
     <pre>${generateVLESSConfig()}</pre>
     
     <h2>📝 Notes</h2>
-    <pre>• All configurations are hardcoded - no environment variables needed
+    <pre>• All configurations are hardcoded - update values in server.ts
+• SSH WebSocket requires password auth (SSH_AUTH_PASSWORD)
+• Use Authorization header, query token, or JSON handshake for SSH auth
 • SSH connections tunneled through WebSocket
 • VLESS proxy for additional protocol support
 • Modify SSH_TARGET_HOST and SSH_TARGET_PORT in source code to change targets</pre>
@@ -504,6 +726,13 @@ serve(
           "Profile-Update-Interval": "24",
           ...corsHeaders
         },
+      });
+    }
+
+    // SSH subscription endpoint
+    if (url.pathname === `/${SSH_SUB_PATH}`) {
+      return new Response(generateSSHSubscription(), {
+        headers: { "Content-Type": "text/plain", ...corsHeaders },
       });
     }
     
@@ -533,9 +762,16 @@ serve(
 
 WebSocket URL: wss://${DOMAIN}/${SSH_PATH}
 Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
+Authentication: required (set SSH_AUTH_PASSWORD)
+
+Auth options:
+  - Authorization: Bearer <password>
+  - Authorization: Basic <base64(username:password)>
+  - Query: ?token=<password> or ?password=<password>
+  - JSON handshake: {"password":"<password>","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
 
 Quick Start:
-  websocat wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
+  websocat -H "Authorization: Bearer <password>" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 For configuration details, visit: /${SSH_PATH}/config`,
         { status: 200, headers: { "Content-Type": "text/plain", ...corsHeaders } }
@@ -552,4 +788,5 @@ console.log(`🌐 WebSocket endpoints:`);
 console.log(`   - VLESS: ws://localhost:${PORT}/${WS_PATH}`);
 console.log(`   - SSH: ws://localhost:${PORT}/${SSH_PATH}`);
 console.log(`   - Subscription: http://localhost:${PORT}/${SUB_PATH}`);
+console.log(`   - SSH Subscription: http://localhost:${PORT}/${SSH_SUB_PATH}`);
 console.log("=".repeat(60));
