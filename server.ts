@@ -15,9 +15,9 @@ const SSH_TARGET_HOST = "railssh-production-232f.up.railway.app";  // Change thi
 const SSH_TARGET_PORT = 22;
 
 // SSH WebSocket Authentication (required)
-// Set a strong password before deploying
-const SSH_AUTH_USERNAME = ""; // Optional username for Basic auth
-const SSH_AUTH_PASSWORD = "CHANGE_THIS_PASSWORD";
+// Set a strong password before deploying (env overrides supported)
+const SSH_AUTH_USERNAME = Deno.env.get("SSH_AUTH_USERNAME") || ""; // Optional username for Basic auth
+const SSH_AUTH_PASSWORD = Deno.env.get("SSH_AUTH_PASSWORD") || "CHANGE_THIS_PASSWORD";
 
 // Allowed SSH hosts (empty array = allow any)
 const ALLOWED_SSH_HOSTS: string[] = []; // Leave empty to allow any host
@@ -139,10 +139,22 @@ function isAuthConfigured(): boolean {
   return SSH_AUTH_PASSWORD.trim().length > 0 && SSH_AUTH_PASSWORD !== "CHANGE_THIS_PASSWORD";
 }
 
+function timingSafeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const aBytes = encoder.encode(a);
+  const bBytes = encoder.encode(b);
+  if (aBytes.length !== bBytes.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < aBytes.length; i++) {
+    mismatch |= aBytes[i] ^ bBytes[i];
+  }
+  return mismatch === 0;
+}
+
 function validateCredentials(password?: string | null, username?: string | null): boolean {
   if (!isAuthConfigured()) return false;
-  if (!password || password !== SSH_AUTH_PASSWORD) return false;
-  if (SSH_AUTH_USERNAME && username !== SSH_AUTH_USERNAME) return false;
+  if (!password || !timingSafeEqual(password, SSH_AUTH_PASSWORD)) return false;
+  if (SSH_AUTH_USERNAME && (!username || !timingSafeEqual(username, SSH_AUTH_USERNAME))) return false;
   return true;
 }
 
@@ -169,7 +181,7 @@ function getRequestAuth(req: Request): RequestAuth {
     return {
       authenticated: false,
       hasCredentials: false,
-      error: "SSH password not configured. Set SSH_AUTH_PASSWORD in server.ts.",
+      error: "SSH password not configured. Set SSH_AUTH_PASSWORD (env or server.ts).",
     };
   }
 
@@ -283,7 +295,7 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
   socket.onopen = () => {
     console.log(`[SSH] New WebSocket connection`);
     if (!isAuthConfigured()) {
-      sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD.");
+      sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD (env or server.ts).");
       return;
     }
     if (initialAuth.hasCredentials && !authenticated) {
@@ -308,7 +320,7 @@ async function handleSSHWebSocket(req: Request): Promise<Response> {
       // First message handling for connection configuration
       if (!connection) {
         if (!isAuthConfigured()) {
-          sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD.");
+          sendAuthError("SSH authentication is not configured. Set SSH_AUTH_PASSWORD (env or server.ts).");
           return;
         }
         if (initialAuth.hasCredentials && !authenticated) {
@@ -556,7 +568,8 @@ function generateVLESSConfig(): string {
 
 function generateSSHConfig(): string {
   const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
-  const passwordValue = isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>";
+  const passwordValue = isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>";
+  const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameValue = SSH_AUTH_USERNAME || "user";
   const basicAuth = btoa(`${usernameValue}:${passwordValue}`);
   return `# SSH over WebSocket Tunnel Configuration
@@ -567,7 +580,8 @@ function generateSSHConfig(): string {
 
 # Authentication (required)
 # Username: ${SSH_AUTH_USERNAME || "(optional)"}
-# Password: ${passwordValue}
+# Password: ${passwordValue} (${authStatus})
+# Password is configured server-side and is not printed here.
 # Header (Bearer): Authorization: Bearer ${passwordValue}
 # Header (Basic): Authorization: Basic ${basicAuth}
 # Query: ${wsUrl}?token=${passwordValue}
@@ -588,7 +602,8 @@ wstunnel client --ws-url ${wsUrl} --header "Authorization: Bearer ${passwordValu
 
 function generateSSHSubscription(): string {
   const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
-  const passwordValue = isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>";
+  const passwordValue = isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>";
+  const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameValue = SSH_AUTH_USERNAME || "(optional)";
   const basicAuth = btoa(`${SSH_AUTH_USERNAME || "user"}:${passwordValue}`);
 
@@ -600,9 +615,11 @@ target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 auth:
   username: ${usernameValue}
-  password: ${passwordValue}
+  password: ${passwordValue} (${authStatus})
   bearer: ${passwordValue}
   basic: ${basicAuth}
+
+# Password is configured server-side and is not printed here.
 
 # JSON handshake example:
 {"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
@@ -696,13 +713,13 @@ serve(
     </div>
     
     <h2>🚀 Quick Start - SSH Tunnel</h2>
-    <pre>websocat -H "Authorization: Bearer ${isAuthConfigured() ? SSH_AUTH_PASSWORD : "<set SSH_AUTH_PASSWORD>"}" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
+    <pre>websocat -H "Authorization: Bearer ${isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>"}" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
     
     <h2>📦 VLESS Configuration</h2>
     <pre>${generateVLESSConfig()}</pre>
     
     <h2>📝 Notes</h2>
-    <pre>• All configurations are hardcoded - update values in server.ts
+    <pre>• Update SSH auth in server.ts (env overrides supported for SSH_AUTH_*)
 • SSH WebSocket requires password auth (SSH_AUTH_PASSWORD)
 • Use Authorization header, query token, or JSON handshake for SSH auth
 • SSH connections tunneled through WebSocket
@@ -762,7 +779,7 @@ serve(
 
 WebSocket URL: wss://${DOMAIN}/${SSH_PATH}
 Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
-Authentication: required (set SSH_AUTH_PASSWORD)
+Authentication: required (set SSH_AUTH_PASSWORD env or server.ts)
 
 Auth options:
   - Authorization: Bearer <password>
