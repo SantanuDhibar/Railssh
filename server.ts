@@ -7,7 +7,7 @@ const DOMAIN = "acute-warthog-31.deno.dev";
 const WS_PATH = "ws";
 const SUB_PATH = "sub";
 const SSH_PATH = "ssh";
-const PORT = 3000;
+const PORT = parseInt(Deno.env.get("PORT") || "3000", 10);
 
 // SSH Target Configuration
 const SSH_TARGET_HOST = "your-ssh-server.com";  // Change this to your SSH server

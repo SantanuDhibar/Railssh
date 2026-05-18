@@ -14,4 +14,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD deno run --allow-net --allow-read https://deno.land/std@0.224.0/http/file_server.ts --check /app || exit 1
 
 # Run the server with necessary permissions
-CMD ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "server.ts"]
+CMD ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "server.ts"]
