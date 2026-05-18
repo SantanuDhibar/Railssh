@@ -16,8 +16,9 @@ const SSH_TARGET_PORT = 22;
 
 // SSH WebSocket Authentication (required)
 // Set a strong password before deploying (env overrides supported)
+const DEFAULT_SSH_AUTH_PASSWORD = "CHANGE_THIS_PASSWORD";
 const SSH_AUTH_USERNAME = Deno.env.get("SSH_AUTH_USERNAME") || ""; // Optional username for Basic auth
-const SSH_AUTH_PASSWORD = Deno.env.get("SSH_AUTH_PASSWORD") || "CHANGE_THIS_PASSWORD";
+const SSH_AUTH_PASSWORD = Deno.env.get("SSH_AUTH_PASSWORD") || DEFAULT_SSH_AUTH_PASSWORD;
 
 // Allowed SSH hosts (empty array = allow any)
 const ALLOWED_SSH_HOSTS: string[] = []; // Leave empty to allow any host
@@ -136,19 +137,17 @@ type RequestAuth = {
 };
 
 function isAuthConfigured(): boolean {
-  return SSH_AUTH_PASSWORD.trim().length > 0 && SSH_AUTH_PASSWORD !== "CHANGE_THIS_PASSWORD";
+  return SSH_AUTH_PASSWORD.trim().length > 0 && SSH_AUTH_PASSWORD !== DEFAULT_SSH_AUTH_PASSWORD;
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
   const encoder = new TextEncoder();
-  const aBytes = encoder.encode(a);
-  const bBytes = encoder.encode(b);
-  const maxLength = Math.max(aBytes.length, bBytes.length);
-  let mismatch = aBytes.length ^ bBytes.length;
-  for (let i = 0; i < maxLength; i++) {
-    const aByte = aBytes[i] ?? 0;
-    const bByte = bBytes[i] ?? 0;
-    mismatch |= aByte ^ bByte;
+  const actualBytes = encoder.encode(a);
+  const expectedBytes = encoder.encode(b);
+  let mismatch = actualBytes.length ^ expectedBytes.length;
+  for (let i = 0; i < expectedBytes.length; i++) {
+    const actualByte = actualBytes[i] ?? 0;
+    mismatch |= actualByte ^ expectedBytes[i];
   }
   return mismatch === 0;
 }
@@ -585,8 +584,7 @@ function generateSSHConfig(): string {
   const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameDisplay = SSH_AUTH_USERNAME || "(optional)";
-  const usernameValue = getUsernamePlaceholder();
-  const basicAuth = btoa(`${usernameValue}:${passwordValue}`);
+  const basicAuth = `<base64(${getUsernamePlaceholder()}:${passwordValue})>`;
   return `# SSH over WebSocket Tunnel Configuration
 # =========================================
 
@@ -600,6 +598,7 @@ function generateSSHConfig(): string {
 # Password is configured server-side and is not printed here.
 # Header (Bearer): Authorization: Bearer ${passwordValue}
 # Header (Basic): Authorization: Basic ${basicAuth}
+# Replace placeholders before encoding.
 # Query: ${wsUrl}?token=${passwordValue}
 # JSON first message: {"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
 
@@ -621,8 +620,7 @@ function generateSSHSubscription(): string {
   const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameValue = SSH_AUTH_USERNAME || "(optional)";
-  const usernameForBasicAuth = getUsernamePlaceholder();
-  const basicAuth = btoa(`${usernameForBasicAuth}:${passwordValue}`);
+  const basicAuth = `<base64(${getUsernamePlaceholder()}:${passwordValue})>`;
 
   return `# SSH over WebSocket Subscription
 # =========================================
@@ -638,6 +636,7 @@ auth:
   basic: ${basicAuth}
 
 # Password is configured server-side and is not printed here.
+# Replace placeholders before encoding.
 
 # JSON handshake example:
 {"password":"${passwordValue}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
@@ -801,7 +800,7 @@ Authentication: required (set SSH_AUTH_PASSWORD env or server.ts)
 
 Auth options:
   - Authorization: Bearer ${getPasswordPlaceholder()}
-  - Authorization: Basic <base64(username:${getPasswordPlaceholder()})>
+  - Authorization: Basic <base64(${getUsernamePlaceholder()}:${getPasswordPlaceholder()})>
   - Query: ?token=${getPasswordPlaceholder()} or ?password=${getPasswordPlaceholder()}
   - JSON handshake: {"password":"${getPasswordPlaceholder()}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
 
