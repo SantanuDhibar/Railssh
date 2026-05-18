@@ -155,9 +155,13 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 function validateCredentials(password?: string | null, username?: string | null): boolean {
   if (!isAuthConfigured()) return false;
-  if (!password || !timingSafeEqual(password, SSH_AUTH_PASSWORD)) return false;
-  if (SSH_AUTH_USERNAME && (!username || !timingSafeEqual(username, SSH_AUTH_USERNAME))) return false;
-  return true;
+  const passwordValue = password ?? "";
+  const usernameValue = username ?? "";
+  const passwordMatches = timingSafeEqual(passwordValue, SSH_AUTH_PASSWORD);
+  const usernameMatches = SSH_AUTH_USERNAME
+    ? timingSafeEqual(usernameValue, SSH_AUTH_USERNAME)
+    : true;
+  return passwordMatches && usernameMatches;
 }
 
 function parseBasicAuth(authHeader: string): { username: string; password: string } | null {
@@ -580,7 +584,7 @@ function generateSSHConfig(): string {
   const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
   const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
-  const usernameLabel = SSH_AUTH_USERNAME || "(optional)";
+  const usernameDisplay = SSH_AUTH_USERNAME || "(optional)";
   const usernameValue = getUsernamePlaceholder();
   const basicAuth = btoa(`${usernameValue}:${passwordValue}`);
   return `# SSH over WebSocket Tunnel Configuration
@@ -590,8 +594,9 @@ function generateSSHConfig(): string {
 # Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 # Authentication (required)
-# Username: ${usernameLabel}
-# Password: ${passwordValue} (${authStatus})
+# Username: ${usernameDisplay}
+# Password: ${passwordValue}
+# Password status: ${authStatus}
 # Password is configured server-side and is not printed here.
 # Header (Bearer): Authorization: Bearer ${passwordValue}
 # Header (Basic): Authorization: Basic ${basicAuth}
@@ -616,8 +621,8 @@ function generateSSHSubscription(): string {
   const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameValue = SSH_AUTH_USERNAME || "(optional)";
-  const usernameExample = getUsernamePlaceholder();
-  const basicAuth = btoa(`${usernameExample}:${passwordValue}`);
+  const usernameForBasicAuth = getUsernamePlaceholder();
+  const basicAuth = btoa(`${usernameForBasicAuth}:${passwordValue}`);
 
   return `# SSH over WebSocket Subscription
 # =========================================
@@ -627,7 +632,8 @@ target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 auth:
   username: ${usernameValue}
-  password: ${passwordValue} (${authStatus})
+  password: ${passwordValue}
+  status: ${authStatus}
   bearer: ${passwordValue}
   basic: ${basicAuth}
 
