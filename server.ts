@@ -143,10 +143,12 @@ function timingSafeEqual(a: string, b: string): boolean {
   const encoder = new TextEncoder();
   const aBytes = encoder.encode(a);
   const bBytes = encoder.encode(b);
-  if (aBytes.length !== bBytes.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < aBytes.length; i++) {
-    mismatch |= aBytes[i] ^ bBytes[i];
+  const maxLength = Math.max(aBytes.length, bBytes.length);
+  let mismatch = aBytes.length ^ bBytes.length;
+  for (let i = 0; i < maxLength; i++) {
+    const aByte = aBytes[i] ?? 0;
+    const bByte = bBytes[i] ?? 0;
+    mismatch |= aByte ^ bByte;
   }
   return mismatch === 0;
 }
@@ -255,6 +257,14 @@ function coercePort(portValue: unknown): number | null {
     if (!Number.isNaN(parsed)) return parsed;
   }
   return null;
+}
+
+function getPasswordPlaceholder(): string {
+  return isAuthConfigured() ? "YOUR_PASSWORD_HERE" : "SET_SSH_AUTH_PASSWORD";
+}
+
+function getUsernamePlaceholder(): string {
+  return SSH_AUTH_USERNAME || "USERNAME";
 }
 
 // ==================== SSH WebSocket Handler ====================
@@ -568,9 +578,10 @@ function generateVLESSConfig(): string {
 
 function generateSSHConfig(): string {
   const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
-  const passwordValue = isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>";
+  const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
-  const usernameValue = SSH_AUTH_USERNAME || "user";
+  const usernameLabel = SSH_AUTH_USERNAME || "(optional)";
+  const usernameValue = getUsernamePlaceholder();
   const basicAuth = btoa(`${usernameValue}:${passwordValue}`);
   return `# SSH over WebSocket Tunnel Configuration
 # =========================================
@@ -579,7 +590,7 @@ function generateSSHConfig(): string {
 # Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 
 # Authentication (required)
-# Username: ${SSH_AUTH_USERNAME || "(optional)"}
+# Username: ${usernameLabel}
 # Password: ${passwordValue} (${authStatus})
 # Password is configured server-side and is not printed here.
 # Header (Bearer): Authorization: Bearer ${passwordValue}
@@ -602,10 +613,11 @@ wstunnel client --ws-url ${wsUrl} --header "Authorization: Bearer ${passwordValu
 
 function generateSSHSubscription(): string {
   const wsUrl = `wss://${DOMAIN}/${SSH_PATH}`;
-  const passwordValue = isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>";
+  const passwordValue = getPasswordPlaceholder();
   const authStatus = isAuthConfigured() ? "configured" : "not configured";
   const usernameValue = SSH_AUTH_USERNAME || "(optional)";
-  const basicAuth = btoa(`${SSH_AUTH_USERNAME || "user"}:${passwordValue}`);
+  const usernameExample = getUsernamePlaceholder();
+  const basicAuth = btoa(`${usernameExample}:${passwordValue}`);
 
   return `# SSH over WebSocket Subscription
 # =========================================
@@ -713,7 +725,7 @@ serve(
     </div>
     
     <h2>🚀 Quick Start - SSH Tunnel</h2>
-    <pre>websocat -H "Authorization: Bearer ${isAuthConfigured() ? "<your SSH_AUTH_PASSWORD>" : "<set SSH_AUTH_PASSWORD>"}" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
+    <pre>websocat -H "Authorization: Bearer ${getPasswordPlaceholder()}" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}</pre>
     
     <h2>📦 VLESS Configuration</h2>
     <pre>${generateVLESSConfig()}</pre>
@@ -782,10 +794,10 @@ Default Target: ${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
 Authentication: required (set SSH_AUTH_PASSWORD env or server.ts)
 
 Auth options:
-  - Authorization: Bearer <password>
-  - Authorization: Basic <base64(username:password)>
-  - Query: ?token=<password> or ?password=<password>
-  - JSON handshake: {"password":"<password>","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
+  - Authorization: Bearer ${getPasswordPlaceholder()}
+  - Authorization: Basic <base64(username:${getPasswordPlaceholder()})>
+  - Query: ?token=${getPasswordPlaceholder()} or ?password=${getPasswordPlaceholder()}
+  - JSON handshake: {"password":"${getPasswordPlaceholder()}","host":"${SSH_TARGET_HOST}","port":${SSH_TARGET_PORT}}
 
 Quick Start:
   websocat -H "Authorization: Bearer <password>" wss://${DOMAIN}/${SSH_PATH} --text ssh://user@${SSH_TARGET_HOST}:${SSH_TARGET_PORT}
