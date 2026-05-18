@@ -3,14 +3,14 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 // ==================== HARDCODED CONFIGURATION ====================
 const UUID = "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
-const DOMAIN = "acute-warthog-31.deno.dev";
+const DOMAIN = "railssh-production-232f.up.railway.app";
 const WS_PATH = "ws";
 const SUB_PATH = "sub";
 const SSH_PATH = "ssh";
 const PORT = parseInt(Deno.env.get("PORT") || "3000", 10);
 
 // SSH Target Configuration
-const SSH_TARGET_HOST = "your-ssh-server.com";  // Change this to your SSH server
+const SSH_TARGET_HOST = "railssh-production-232f.up.railway.app";  // Change this to your SSH server
 const SSH_TARGET_PORT = 22;
 
 // Allowed SSH hosts (empty array = allow any)
